@@ -8,7 +8,6 @@ matrix:
         - env: TOXENV=py36
         - env: TOXENV=black
         - env: TOXENV=flake8
-        - env: TOXENV=docs
         - env: TOXENV=coverage
         - env: TOXENV=bandit
 install:
