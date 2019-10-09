@@ -5,6 +5,7 @@ import random
 import math
 import hashlib
 from typing import Any
+from defusedxml import ElementTree
 
 import aiohttp
 from botocore.auth import S3SigV4Auth
@@ -38,6 +39,7 @@ _BACKOFF_CAP = 15
 # The size of the buffer that we read into when computing
 # MD5 checksums.
 _MD5_CHUNK_SIZE_BYTES = 1024 * 1024
+_XML_NAMESPACES = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 
 
 class AsyncConcurrentS3Client:
@@ -250,6 +252,78 @@ class AsyncConcurrentS3Client:
             else:
                 raise e
 
+    async def prefix_exists(self, bucket_name: str, key_prefix: str):
+        """
+        Determine if any objects exist on S3 in the specified bucket
+        and key prefix.
+
+        Parameters
+        ----------
+        bucket_name : str
+            Name of the bucket that contains the object.
+        key_prefix : str
+            Key prefix of the objects.
+
+        Returns
+        -------
+        bool
+            `True` if objects exist, `False` if not.
+
+        Raises
+        ------
+        aiohttp.ClientError
+            On request failure or connection error (after retries).
+        """
+        found = False
+        async for _ in self.iterate_keys(bucket_name, key_prefix):
+            found = True
+            break
+        return found
+
+    async def iterate_keys(self, bucket_name: str, key_prefix: str = None):
+        """
+        Iterate bucket keys, optionally with the specified prefix.
+
+        Parameters
+        ----------
+        bucket_name : str
+            Name of the bucket to query.
+        key_prefix : str, optional
+            Key prefix of the objects.
+
+        Yields
+        ------
+        str
+            Key of an object in the bucket.
+
+        Raises
+        ------
+        aiohttp.ClientError
+            On request failure or connection error (after retries).
+        """
+        next_continuation_token = None
+        while True:
+            next_continuation_token, keys = await self._list_keys(bucket_name, key_prefix, next_continuation_token)
+            for key in keys:
+                yield key
+            if next_continuation_token is None:
+                break
+
+    async def _list_keys(self, bucket_name, key_prefix, continuation_token):
+        url = self._make_list_objects_url(bucket_name, prefix=key_prefix, continuation_token=continuation_token)
+        root = await self._request_with_retries(self._get_xml_response, url)
+        keys = [
+            elem.findtext("s3:Key", namespaces=_XML_NAMESPACES)
+            for elem in root.iterfind("s3:Contents", _XML_NAMESPACES)
+        ]
+        return root.findtext("s3:NextContinuationToken", namespaces=_XML_NAMESPACES), keys
+
+    async def _get_xml_response(self, url):
+        headers = self._sign_headers("GET", url)
+        async with self._session.get(url, headers=headers) as response:
+            content = await response.read()
+            return ElementTree.fromstring(content)
+
     async def _head_object(self, url):
         headers = self._sign_headers("HEAD", url)
         async with self._session.head(url, headers=headers) as response:
@@ -277,6 +351,14 @@ class AsyncConcurrentS3Client:
 
     def _make_object_url(self, bucket_name, key):
         return f"https://{bucket_name}.s3.amazonaws.com/" + key
+
+    def _make_list_objects_url(self, bucket_name, prefix=None, continuation_token=None):
+        url = f"https://{bucket_name}.s3.amazonaws.com/?list-type=2"
+        if prefix is not None:
+            url = url + f"&Prefix={prefix}"
+        if continuation_token is not None:
+            url = url + f"&ContinuationToken={continuation_token}"
+        return url
 
     def _sign_headers(self, method, url, headers={}):
         # Hijack botocore's machinery to sign the request.  This is a complicated
@@ -408,6 +490,61 @@ class ConcurrentS3Client:
         """
 
         return self._loop.run_until_complete(self._async_client.object_exists(bucket_name, key))
+
+    def prefix_exists(self, bucket_name: str, key_prefix: str):
+        """
+        Determine if any objects exist on S3 in the specified bucket
+        and key prefix.
+
+        Parameters
+        ----------
+        bucket_name : str
+            Name of the bucket that contains the object.
+        key_prefix : str
+            Key prefix of the objects.
+
+        Returns
+        -------
+        bool
+            `True` if objects exist, `False` if not.
+
+        Raises
+        ------
+        aiohttp.ClientError
+            On request failure or connection error (after retries).
+        """
+
+        return self._loop.run_until_complete(self._async_client.prefix_exists(bucket_name, key_prefix))
+
+    def iterate_keys(self, bucket_name: str, key_prefix: str = None):
+        """
+        Iterate bucket keys, optionally with the specified prefix.
+
+        Parameters
+        ----------
+        bucket_name : str
+            Name of the bucket to query.
+        key_prefix : str, optional
+            Key prefix of the objects.
+
+        Yields
+        ------
+        str
+            Key of an object in the bucket.
+
+        Raises
+        ------
+        aiohttp.ClientError
+            On request failure or connection error (after retries).
+        """
+        next_continuation_token = None
+        while True:
+            next_continuation_token, keys = self._loop.run_until_complete(
+                self._async_client._list_keys(bucket_name, key_prefix, next_continuation_token)
+            )
+            yield from keys
+            if next_continuation_token is None:
+                break
 
     def close(self):
         """
