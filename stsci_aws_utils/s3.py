@@ -40,6 +40,12 @@ _BACKOFF_CAP = 15
 # MD5 checksums.
 _MD5_CHUNK_SIZE_BYTES = 1024 * 1024
 _XML_NAMESPACES = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+# These are factors of 1 MiB that are used to divide multipart object
+# content into parts for MD5 computation.  It is not currently known
+# if these cover all of aws-cli's behavior.  If you're experiencing
+# mysterious MD5 checksum failures, try adding additional powers of 2
+# here.
+_MULTIPART_MD5_FACTORS = [1, 2]
 
 
 class AsyncConcurrentS3Client:
@@ -172,14 +178,17 @@ class AsyncConcurrentS3Client:
 
         # If we see this happen in the wild, we should consider adding
         # an overall retry.
-        md5 = self._compute_md5(content, content_length, num_parts).hex()
+        for min_part_factor in _MULTIPART_MD5_FACTORS:
+            md5 = self._compute_md5(content, content_length, num_parts, min_part_factor).hex()
+            if md5 == expected_md5:
+                break
         if md5 != expected_md5:
             raise aiohttp.ClientError("Failed MD5 checksum verification")
 
         content.seek(0)
         return content
 
-    def _compute_md5(self, file, content_length, num_parts=1):
+    def _compute_md5(self, file, content_length, num_parts=1, min_part_factor=1):
         if num_parts == 1:
             # Single-part uploads have a simple MD5 of their content.
             return self._compute_partial_md5(file, 0, content_length)
@@ -189,9 +198,13 @@ class AsyncConcurrentS3Client:
             # size of each part at this point, but we can make a reasonable
             # guess with some assumptions: we assume here that all parts but the
             # last are the same size, and we assume that the part size is a
-            # multiple of 1024 * 1024.  This is confirmed to be compatible with
-            # awscli, boto3, and objects uploaded via the console.
-            part_size_bytes = math.floor(content_length / (1024 * 1024) / (num_parts - 1)) * 1024 * 1024
+            # multiple of min_part_factor * 1024 * 1024.
+            part_size_bytes = (
+                math.floor(content_length / (min_part_factor * 1024 * 1024) / (num_parts - 1))
+                * min_part_factor
+                * 1024
+                * 1024
+            )
             partial_md5s = []
             start_byte = 0
             while start_byte < content_length:
