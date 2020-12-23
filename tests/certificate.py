@@ -59,7 +59,7 @@ class TemporaryCertificate:
         self._cert_file.close()
 
     def load_verify(self, context):
-        """ Load the certificate for verification purposes.
+        """Load the certificate for verification purposes.
         :param ssl.SSLContext context: a SSL context that will be associated with the server.
         """
         context.load_verify_locations(cafile=self._cert_file.name)
