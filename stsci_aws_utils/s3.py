@@ -67,7 +67,7 @@ class AsyncConcurrentS3Client:
     session : aiohttp.ClientSession, optional
         aiohttp session object used to make requests.  If you provide a custom session,
         be sure to create it with raise_for_status=True.
-   """
+    """
 
     def __init__(
         self,
